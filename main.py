@@ -12,10 +12,32 @@ HEADERS = {
     "Content-Type": "application/json"
 }
 
+
+def criar_customer(nome: str):
+    payload = {
+        "name": nome
+    }
+
+    r = requests.post(
+        f"{ASAAS_URL}/customers",
+        json=payload,
+        headers=HEADERS
+    )
+
+    if r.status_code != 200:
+        raise HTTPException(status_code=400, detail=r.text)
+
+    return r.json()["id"]
+
+
 @app.post("/payments/create")
 def create_payment(data: dict):
+    customer_id = criar_customer(
+        nome=f"Telegram User {data.get('telegram_user_id', 'desconhecido')}"
+    )
+
     payload = {
-        "customer": data["customer_id"],
+        "customer": customer_id,
         "billingType": "PIX",
         "value": data["value"],
         "description": data.get("description", "Pagamento via Telegram")
