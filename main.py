@@ -5,6 +5,10 @@ from datetime import date, timedelta
 
 app = FastAPI()
 
+# =========================
+# Configurações Asaas
+# =========================
+
 ASAAS_API_KEY = os.getenv("ASAAS_API_KEY")
 ASAAS_URL = "https://api.asaas.com/v3"
 
@@ -13,58 +17,155 @@ HEADERS = {
     "Content-Type": "application/json"
 }
 
-@app.post("/payments/create")
-def create_payment(data: dict):
-    # LOG simples
-    print("Dados recebidos:", data)
+# =========================
+# Utilidades
+# =========================
 
-    customer_payload = {
-        "name": f"Telegram User {data.get('telegram_user_id')}",
-        "cpfCnpj": data["cpf_cnpj"]
+def criar_customer(telegram_user_id: int, cpf_cnpj: str) -> str:
+    payload = {
+        "name": f"Telegram User {telegram_user_id}",
+        "cpfCnpj": cpf_cnpj
     }
 
-    print("Criando customer:", customer_payload)
-
-    r_customer = requests.post(
+    r = requests.post(
         f"{ASAAS_URL}/customers",
-        json=customer_payload,
-        headers=HEADERS
+        json=payload,
+        headers=HEADERS,
+        timeout=15
     )
 
-    print("Resposta customer:", r_customer.status_code, r_customer.text)
+    if r.status_code not in (200, 201):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Erro ao criar customer: {r.text}"
+        )
 
-    if r_customer.status_code not in [200, 201]:
-        raise HTTPException(status_code=400, detail=r_customer.text)
+    return r.json()["id"]
 
-    customer_id = r_customer.json()["id"]
 
+def criar_pagamento_pix(customer_id: str, value: float, description: str) -> str:
     due_date = (date.today() + timedelta(days=1)).isoformat()
 
-    payment_payload = {
+    payload = {
         "customer": customer_id,
         "billingType": "PIX",
-        "value": data["value"],
+        "value": value,
         "dueDate": due_date,
-        "description": data.get("description", "Pagamento via Telegram")
+        "description": description
     }
 
-    print("Criando pagamento:", payment_payload)
-
-    r_payment = requests.post(
+    r = requests.post(
         f"{ASAAS_URL}/payments",
-        json=payment_payload,
-        headers=HEADERS
+        json=payload,
+        headers=HEADERS,
+        timeout=15
     )
 
-    print("Resposta pagamento:", r_payment.status_code, r_payment.text)
+    if r.status_code not in (200, 201):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Erro ao criar pagamento: {r.text}"
+        )
 
-    if r_payment.status_code not in [200, 201]:
-        raise HTTPException(status_code=400, detail=r_payment.text)
+    return r.json()["id"]
 
-    p = r_payment.json()
+
+def obter_pix(payment_id: str) -> dict:
+    r = requests.get(
+        f"{ASAAS_URL}/payments/{payment_id}/pixQrCode",
+        headers=HEADERS,
+        timeout=15
+    )
+
+    if r.status_code != 200:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Erro ao obter Pix: {r.text}"
+        )
+
+    pix = r.json()
 
     return {
-        "payment_id": p["id"],
-        "qr_code": p["pixTransaction"]["qrCodeImage"],
-        "pix_code": p["pixTransaction"]["payload"]
+        "qr_code": pix["encodedImage"],
+        "pix_code": pix["payload"]
     }
+
+
+# =========================
+# Endpoints
+# =========================
+
+@app.post("/payments/create")
+def create_payment(data: dict):
+    """
+    Cria uma cobrança Pix no Asaas e retorna:
+    - payment_id
+    - QR Code (base64)
+    - Pix copia e cola
+    """
+
+    # Validações básicas
+    if "telegram_user_id" not in data:
+        raise HTTPException(status_code=400, detail="telegram_user_id é obrigatório")
+
+    if "cpf_cnpj" not in data:
+        raise HTTPException(status_code=400, detail="cpf_cnpj é obrigatório")
+
+    if "value" not in data or data["value"] < 5:
+        raise HTTPException(
+            status_code=400,
+            detail="O valor mínimo para Pix é R$ 5,00"
+        )
+
+    telegram_user_id = data["telegram_user_id"]
+    cpf_cnpj = data["cpf_cnpj"]
+    value = float(data["value"])
+    description = data.get("description", "Pagamento via Telegram")
+
+    # 1. Cria customer
+    customer_id = criar_customer(
+        telegram_user_id=telegram_user_id,
+        cpf_cnpj=cpf_cnpj
+    )
+
+    # 2. Cria pagamento
+    payment_id = criar_pagamento_pix(
+        customer_id=customer_id,
+        value=value,
+        description=description
+    )
+
+    # 3. Obtém QR Code Pix
+    pix = obter_pix(payment_id)
+
+    return {
+        "payment_id": payment_id,
+        "qr_code": pix["qr_code"],
+        "pix_code": pix["pix_code"]
+    }
+
+
+@app.get("/payments/status/{payment_id}")
+def payment_status(payment_id: str):
+    """
+    Consulta o status do pagamento no Asaas
+    """
+
+    r = requests.get(
+        f"{ASAAS_URL}/payments/{payment_id}",
+        headers=HEADERS,
+        timeout=15
+    )
+
+    if r.status_code != 200:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Erro ao consultar pagamento: {r.text}"
+        )
+
+    status_asaas = r.json()["status"]
+
+    if status_asaas in ("RECEIVED", "CONFIRMED"):
+        return {"status": "paid"}
+
+    return {"status": "pending"}
