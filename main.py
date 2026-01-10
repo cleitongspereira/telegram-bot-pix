@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
 import requests
 import os
+from datetime import date, timedelta
 
 app = FastAPI()
 
@@ -12,67 +13,58 @@ HEADERS = {
     "Content-Type": "application/json"
 }
 
+@app.post("/payments/create")
+def create_payment(data: dict):
+    # LOG simples
+    print("Dados recebidos:", data)
 
-def criar_customer(nome: str):
-    payload = {
-        "name": nome
+    customer_payload = {
+        "name": f"Telegram User {data.get('telegram_user_id')}",
+        "cpfCnpj": data["cpf_cnpj"]
     }
 
-    r = requests.post(
+    print("Criando customer:", customer_payload)
+
+    r_customer = requests.post(
         f"{ASAAS_URL}/customers",
-        json=payload,
+        json=customer_payload,
         headers=HEADERS
     )
 
-    if r.status_code != 200:
-        raise HTTPException(status_code=400, detail=r.text)
+    print("Resposta customer:", r_customer.status_code, r_customer.text)
 
-    return r.json()["id"]
+    if r_customer.status_code not in [200, 201]:
+        raise HTTPException(status_code=400, detail=r_customer.text)
 
+    customer_id = r_customer.json()["id"]
 
-@app.post("/payments/create")
-def create_payment(data: dict):
-    customer_id = criar_customer(
-        nome=f"Telegram User {data.get('telegram_user_id', 'desconhecido')}"
-    )
+    due_date = (date.today() + timedelta(days=1)).isoformat()
 
-    payload = {
+    payment_payload = {
         "customer": customer_id,
         "billingType": "PIX",
         "value": data["value"],
+        "dueDate": due_date,
         "description": data.get("description", "Pagamento via Telegram")
     }
 
-    r = requests.post(
+    print("Criando pagamento:", payment_payload)
+
+    r_payment = requests.post(
         f"{ASAAS_URL}/payments",
-        json=payload,
+        json=payment_payload,
         headers=HEADERS
     )
 
-    if r.status_code != 200:
-        raise HTTPException(status_code=400, detail=r.text)
+    print("Resposta pagamento:", r_payment.status_code, r_payment.text)
 
-    p = r.json()
+    if r_payment.status_code not in [200, 201]:
+        raise HTTPException(status_code=400, detail=r_payment.text)
+
+    p = r_payment.json()
 
     return {
         "payment_id": p["id"],
         "qr_code": p["pixTransaction"]["qrCodeImage"],
         "pix_code": p["pixTransaction"]["payload"]
-    }
-
-
-@app.get("/payments/status/{payment_id}")
-def payment_status(payment_id: str):
-    r = requests.get(
-        f"{ASAAS_URL}/payments/{payment_id}",
-        headers=HEADERS
-    )
-
-    if r.status_code != 200:
-        raise HTTPException(status_code=400, detail=r.text)
-
-    status = r.json()["status"]
-
-    return {
-        "status": "paid" if status in ["RECEIVED", "CONFIRMED"] else "pending"
     }
